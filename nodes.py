@@ -16,9 +16,7 @@ from PIL import Image, ImageDraw
 import cv2
 from PIL import ImageFont
 
-from folder_paths import models_dir
-
-ultra_models_dir = os.path.join(models_dir, "ultralytics")
+import folder_paths
 
 coco_classes = [
     'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat',
@@ -281,6 +279,10 @@ _COLORS = (
     .astype(np.float32)
     .reshape(-1, 3)
 )
+
+ultra_models_dir = os.path.join(folder_paths.models_dir, "ultralytics")
+os.makedirs(ultra_models_dir, exist_ok=True)
+folder_paths.add_model_folder_path("ultralytics", ultra_models_dir)
 
 
 class BBoxVisNode:
@@ -545,12 +547,12 @@ class UltralyticsModelLoader:
 class CustomUltralyticsModelLoader:
     @classmethod
     def INPUT_TYPES(s):
-        files = []
-        for root, dirs, filenames in os.walk(ultra_models_dir):
-            for filename in filenames:
-                if filename.endswith(".pt"):
-                    relative_path = os.path.relpath(os.path.join(root, filename), ultra_models_dir)
-                    files.append(relative_path)
+        files = [
+            file
+            for file in folder_paths.get_filename_list("ultralytics")
+            if file.endswith(".pt")
+        ]
+
         return {
             "required": {
                 "model_path": (sorted(files), {"model_upload": True})
@@ -562,7 +564,7 @@ class CustomUltralyticsModelLoader:
     FUNCTION = "load_model"
 
     def load_model(self, model_path):
-        model_full_path = os.path.join(ultra_models_dir, model_path)
+        model_full_path = folder_paths.get_full_path("ultralytics", model_path)
         model = YOLO(model_full_path)
         return (model,)
 
@@ -604,8 +606,8 @@ class UltralyticsModelLoader:
         model_url = f"https://github.com/ultralytics/assets/releases/download/v8.2.0/{model_name}"
 
         # Create a "models/ultralytics" directory if it doesn't exist
-        os.makedirs(ultra_models_dir, exist_ok=True)
-        model_path = os.path.join(ultra_models_dir, model_name)
+        os.makedirs(folder_paths.get_full_path("ultralytics"), exist_ok=True)
+        model_path = folder_paths.get_full_path("ultralytics", model_name)
 
         # Check if the model file already exists
         if os.path.exists(model_path):
@@ -908,6 +910,40 @@ class UltralyticsInference:
         # return empty mask
         return torch.zeros((height, width), dtype=torch.float32).unsqueeze(0)
 
+class UltralyticsMaskFlatten:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "masks": ("MASK",),  # 接收来自 UltralyticsInference 的 comfy_masks
+            }
+        }
+    
+    RETURN_TYPES = ("MASK",)
+    FUNCTION = "flatten_masks"
+    CATEGORY = "Ultralytics/PostProcess"
+
+    def flatten_masks(self, masks):
+        # 情况 1: 输入是单张图片，检测到 N 个物体
+        # 形状: (N, Height, Width)
+        if masks.dim() == 3:
+            # 在第0维取最大值（相当于逻辑 OR 操作），合并所有物体
+            # torch.max 返回 (values, indices)，我们只需要 values
+            flattened = torch.max(masks, dim=0)[0]
+            # 增加 Batch 维度，变成 (1, H, W) 以符合 ComfyUI 标准
+            return (flattened.unsqueeze(0),)
+
+        # 情况 2: 输入是视频批次 (Batch)，每帧检测到 N 个物体
+        # 形状: (Batch, N, Height, Width)
+        elif masks.dim() == 4:
+            # 在第1维 (N) 取最大值，将单帧内的所有物体层合并
+            # 结果形状变成 (Batch, Height, Width)
+            flattened = torch.max(masks, dim=1)[0]
+            return (flattened,)
+
+        # 如果输入形状奇怪，原样返回
+        return (masks,)
+
 class UltralyticsVisualization:
     @classmethod
     def INPUT_TYPES(s):
@@ -992,6 +1028,7 @@ NODE_CLASS_MAPPINGS = {
     "ImageResizeAdvanced": ImageResizeAdvanced,
     "BBoxVisNode": BBoxVisNode,
     "ViewText": ViewText,
+    "UltralyticsMaskFlatten": UltralyticsMaskFlatten,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1007,4 +1044,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ImageResizeAdvanced": "Image Resize Advanced",
     "BBoxVisNode": "BBox Visualization",
     "ViewText": "View Text",
+    "UltralyticsMaskFlatten": "Ultralytics Flatten Masks",
 }
